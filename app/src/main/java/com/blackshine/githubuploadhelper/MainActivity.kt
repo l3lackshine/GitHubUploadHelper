@@ -86,7 +86,7 @@ class MainActivity : Activity() {
     private fun field(parent: LinearLayout, label: String, hint: String): EditText {
         parent.addView(TextView(this).apply { text = label; textSize = 14f; setPadding(2, 9, 2, 3) })
         val e = EditText(this).apply {
-            this.hint = hint; textSize = 15f; singleLine = true
+            this.hint = hint; textSize = 15f; setSingleLine(true)
             setPadding(12, 8, 12, 8); setBackgroundColor(0xFFFFFFFF.toInt())
         }
         parent.addView(e, LinearLayout.LayoutParams(-1, -2))
