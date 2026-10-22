@@ -1,24 +1,26 @@
-# GitHub Upload Helper Android — v2.0
+# GitHub Upload Helper Android — v3.1
 
-แอป Android สำหรับเลือก ZIP แล้วอัปโหลดไฟล์ไปยัง GitHub Repository ผ่าน GitHub REST API โดยตรง
+Android helper for syncing ZIP project files to GitHub via GitHub REST API.
 
-## ความสามารถ v2.0
-- แท็บตั้งค่า Repository: Token, Owner, Repository, Branch และตรวจสอบการเข้าถึง
-- บันทึก Owner / Repository / Branch ในเครื่อง แต่ไม่บันทึก Token ลง SharedPreferences
-- ทางลัดเปิด Repository, Code, Commits, Repository Settings, Releases และหน้าจัดการ/สร้าง Personal Access Token
-- อัปโหลดไฟล์ใน ZIP
-- ตัวเลือกอนุญาตเขียนทับไฟล์เดิม โดยอ่าน SHA ของไฟล์เดิมก่อนเรียก API
-- โหมดลบ: ใช้ path จาก ZIP เป็นรายการเป้าหมาย ลบไฟล์ตรงกันหลังยืนยัน และสร้าง commit จริง
-- จำกัด 500 ไฟล์ และขนาดรวมหลังแตก ZIP 150 MB; ปฏิเสธ path ที่ไม่ปลอดภัย
+## v3.1 updates
+- Compact, collapsible CMD-style console so it no longer consumes the screen or blocks access to lower controls.
+- Persists a project workspace inside the app's private files directory, separated by Owner/Repository.
+- Creates the workspace when missing; extracts the selected ZIP into it and keeps it for the next upload.
+- Compares incoming files against the existing local workspace using SHA-256 and reports added, changed, unchanged, and removed files. Removed files are not deleted automatically.
+- Upload mode sends only files that are new or changed relative to the previous local workspace; users should extract/compare the ZIP before uploading.
+- Version name 3.1; Java and Kotlin target JVM 17.
 
-## Token permissions
-สำหรับ Fine-grained personal access token ให้เลือก Repository ที่ต้องการ และตั้ง `Contents: Read and write`. หากแก้ไขไฟล์ใน `.github/workflows` ให้ตั้ง `Workflows: Read and write` ด้วย ตรวจสิทธิ์เบื้องต้นจาก API ไม่สามารถรับประกันผลของ Branch protection หรือข้อกำหนดขององค์กรได้ การเขียนทับ/ลบจะตรวจผลตอบกลับจริงจาก API
+## Security and behavior
+- Owner, Repository and Branch are saved locally; the token is not saved in SharedPreferences.
+- Fine-grained PAT typically needs Contents: Read and write. Editing `.github/workflows` may require Workflows: Read and write.
+- File deletion remains a separate explicitly confirmed action.
+- The local workspace is private app storage and is removed if the app's data is cleared or the app is uninstalled.
 
 ## Build
 - JDK 17
 - Gradle 8.9
 - Android SDK compileSdk 35
-- คำสั่ง: `gradle assembleDebug`
-- ไฟล์ APK: `app/build/outputs/apk/debug/app-debug.apk`
+- `gradle assembleDebug`
+- APK: `app/build/outputs/apk/debug/app-debug.apk`
 
-APK debug เหมาะสำหรับทดสอบ ไม่ใช่ release signing สำหรับ Play Store. Token ใช้ส่งตรงไป `api.github.com` ผ่าน HTTPS; ห้ามแชร์ Token และเพิกถอนทันทีหากสงสัยว่าหลุด
+This source has not been built in this environment; run GitHub Actions or `gradle assembleDebug` to validate the APK.
