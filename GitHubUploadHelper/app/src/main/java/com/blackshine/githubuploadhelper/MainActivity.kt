@@ -1,0 +1,225 @@
+package com.blackshine.githubuploadhelper
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.os.Bundle
+import android.content.Intent
+import android.net.Uri
+import android.util.Base64
+import android.view.Gravity
+import android.view.View
+import android.graphics.Typeface
+import android.text.method.ScrollingMovementMethod
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import android.widget.*
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.util.concurrent.Executors
+import java.util.zip.ZipInputStream
+
+class MainActivity : Activity() {
+    private val executor = Executors.newSingleThreadExecutor()
+    private lateinit var token: EditText
+    private lateinit var owner: EditText
+    private lateinit var repo: EditText
+    private lateinit var branch: EditText
+    private lateinit var dest: EditText
+    private lateinit var message: EditText
+    private lateinit var log: TextView
+    private lateinit var console: TextView
+    private val logLines = StringBuilder()
+    private var workflowFound = false
+    private lateinit var selectedLabel: TextView
+    private lateinit var settingsPanel: LinearLayout
+    private lateinit var uploadPanel: LinearLayout
+    private lateinit var linksPanel: LinearLayout
+    private lateinit var overwrite: CheckBox
+    private lateinit var deleteMode: CheckBox
+    private var selected: Uri? = null
+    private var zipEntries: List<ZipEntryData> = emptyList()
+    private var repoPermissions: JSONObject? = null
+    data class ZipEntryData(val path: String, val bytes: ByteArray)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val prefs = getSharedPreferences("repo_settings", MODE_PRIVATE)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(14, 12, 14, 12); setBackgroundColor(0xFFF3F5F9.toInt()) }
+        val header = TextView(this).apply { text = "GitHub Upload Helper 3.0"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
+        root.addView(header)
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(tabs)
+        val scroll = ScrollView(this)
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        scroll.addView(content)
+        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val consoleTitle = TextView(this).apply { text = "CONSOLE / LOG"; textSize = 13f; typeface = Typeface.MONOSPACE; setTextColor(0xFF9BE7A5.toInt()); setPadding(10, 7, 10, 2); setBackgroundColor(0xFF20242B.toInt()) }
+        root.addView(consoleTitle)
+        log = TextView(this).apply { text = "[READY] พร้อมใช้งาน"; textSize = 12f; typeface = Typeface.MONOSPACE; movementMethod = ScrollingMovementMethod(); setTextColor(0xFFE7F3E8.toInt()); setPadding(10, 8, 10, 8); setBackgroundColor(0xFF20242B.toInt()); minHeight = 110; maxHeight = 230 }
+        root.addView(log, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 0 })
+        val clearLog = Button(this).apply { text = "ล้าง Log"; setOnClickListener { logLines.clear(); setLog("[READY] ล้าง Log แล้ว") } }
+        root.addView(clearLog)
+        setContentView(root)
+
+        settingsPanel = panel(content)
+        uploadPanel = panel(content)
+        linksPanel = panel(content)
+
+        token = field(settingsPanel, "GitHub Personal Access Token", "").apply { inputType = 129 }
+        owner = field(settingsPanel, "Owner / Username", "").apply { setText(prefs.getString("owner", "")) }
+        repo = field(settingsPanel, "Repository", "").apply { setText(prefs.getString("repo", "")) }
+        branch = field(settingsPanel, "Branch", "").apply { setText(prefs.getString("branch", "main")) }
+        button(settingsPanel, "บันทึกการตั้งค่า Repository") {
+            prefs.edit().putString("owner", owner.text.toString().trim()).putString("repo", repo.text.toString().trim()).putString("branch", branch.text.toString().trim()).apply()
+            setLog("บันทึก Owner / Repository / Branch แล้ว (ไม่ได้บันทึก Token เพื่อความปลอดภัย)")
+        }
+        button(settingsPanel, "ตรวจสอบ Token / Repository / Branch และสิทธิ์") { runTask { checkAll() } }
+        button(settingsPanel, "เปิดหน้า Repository") { openGitHub(repoUrl()) }
+        button(settingsPanel, "เปิดหน้า Code") { openGitHub(repoUrl() + "/tree/" + enc(branch.text.toString().trim().ifEmpty { "main" })) }
+        button(settingsPanel, "เปิดหน้า Commits") { openGitHub(repoUrl() + "/commits/" + enc(branch.text.toString().trim().ifEmpty { "main" })) }
+        button(settingsPanel, "เปิดหน้าสร้าง Fine-grained Token") { openGitHub("https://github.com/settings/personal-access-tokens/new") }
+        button(settingsPanel, "เปิดหน้า Token ที่มีอยู่") { openGitHub("https://github.com/settings/personal-access-tokens") }
+        button(settingsPanel, "เปิดหน้า Settings ของ Repository") { openGitHub(repoUrl() + "/settings") }
+        button(settingsPanel, "เปิดหน้า Releases") { openGitHub(repoUrl() + "/releases") }
+
+        uploadPanel.addView(TextView(this).apply { text = "อัปโหลด / เขียนทับ / ลบไฟล์"; textSize = 19f; setTextColor(0xFF172554.toInt()); setPadding(2, 8, 2, 4) })
+        dest = field(uploadPanel, "โฟลเดอร์ปลายทางใน GitHub (ไม่บังคับ)", "")
+        message = field(uploadPanel, "ข้อความ Commit", "").apply { setText("Upload project from Android") }
+        overwrite = CheckBox(this).apply { text = "อนุญาตเขียนทับไฟล์ที่มีอยู่ใน GitHub"; isChecked = false }
+        uploadPanel.addView(overwrite)
+        deleteMode = CheckBox(this).apply { text = "โหมดลบไฟล์: ลบไฟล์ใน GitHub ที่มี path ตรงกับไฟล์ใน ZIP (ไม่อัปโหลด)"; isChecked = false }
+        uploadPanel.addView(deleteMode)
+        uploadPanel.addView(TextView(this).apply { text = "โหมดลบจะใช้รายชื่อ path จาก ZIP เป็นรายการเป้าหมาย ต้องยืนยันอีกครั้งก่อนลบ และลบไม่ได้หาก Token ไม่มีสิทธิ์หรือไฟล์เปลี่ยนไปแล้ว"; textSize = 12f; setPadding(4, 4, 4, 8) })
+        button(uploadPanel, "1. เลือกไฟล์ ZIP") { pickZip() }
+        selectedLabel = TextView(this).apply { text = "ยังไม่ได้เลือก ZIP"; textSize = 14f; setPadding(8, 10, 8, 10); setBackgroundColor(0xFFFFFFFF.toInt()) }
+        uploadPanel.addView(selectedLabel)
+        button(uploadPanel, "2. แตก ZIP และแสดงรายการไฟล์") { runTask { extractZip() } }
+        button(uploadPanel, "3. ตรวจสิทธิ์ก่อนดำเนินการ") { runTask { checkAll() } }
+        button(uploadPanel, "4. เริ่มทำรายการตามโหมดที่เลือก") {
+            if (deleteMode.isChecked) AlertDialog.Builder(this).setTitle("ยืนยันลบไฟล์ใน GitHub")
+                .setMessage("จะลบไฟล์ที่มี path ตรงกับไฟล์ใน ZIP จาก Repository/Branch ที่ตั้งไว้ ไฟล์ที่ลบแล้วจะเกิด commit จริง ต้องการดำเนินการหรือไม่?")
+                .setNegativeButton("ยกเลิก", null).setPositiveButton("ยืนยันลบ") { _, _ -> runTask { deleteMatchingFiles() } }.show()
+            else runTask { uploadAll() }
+        }
+        button(uploadPanel, "คู่มือแก้ปัญหา") { showHelp() }
+
+        linksPanel.addView(TextView(this).apply { text = "ทางลัด GitHub"; textSize = 19f; setTextColor(0xFF172554.toInt()); setPadding(2, 8, 2, 4) })
+        button(linksPanel, "สร้าง Token (Fine-grained)") { openGitHub("https://github.com/settings/personal-access-tokens/new") }
+        button(linksPanel, "รายการ Token") { openGitHub("https://github.com/settings/personal-access-tokens") }
+        button(linksPanel, "Repository / Code / Commits") { openGitHub(repoUrl()) }
+        button(linksPanel, "เอกสารสิทธิ์ GitHub API") { openGitHub("https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens") }
+        button(linksPanel, "เอกสารจัดการไฟล์ (สร้าง/แก้ไข/ลบ)") { openGitHub("https://docs.github.com/en/rest/repos/contents") }
+
+        fun tab(label: String, target: LinearLayout) { tabs.addView(Button(this).apply { text = label; textSize = 11f; setOnClickListener { settingsPanel.visibility = View.GONE; uploadPanel.visibility = View.GONE; linksPanel.visibility = View.GONE; target.visibility = View.VISIBLE } }, LinearLayout.LayoutParams(0, -2, 1f)) }
+        tab("ตั้งค่า Repository", settingsPanel); tab("อัปโหลดไฟล์", uploadPanel); tab("ทางลัด GitHub", linksPanel)
+        settingsPanel.visibility = View.VISIBLE; uploadPanel.visibility = View.GONE; linksPanel.visibility = View.GONE
+    }
+
+    private fun panel(parent: LinearLayout) = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(4, 4, 4, 8); parent.addView(this) }
+    private fun field(parent: LinearLayout, label: String, hint: String): EditText {
+        parent.addView(TextView(this).apply { text = label; textSize = 14f; setPadding(2, 9, 2, 3) })
+        val e = EditText(this).apply { this.hint = ""; textSize = 15f; setSingleLine(true); setPadding(12, 8, 12, 8); setBackgroundColor(0xFFFFFFFF.toInt()) }
+        parent.addView(e, LinearLayout.LayoutParams(-1, -2)); return e
+    }
+    private fun button(parent: LinearLayout, label: String, action: () -> Unit) { parent.addView(Button(this).apply { text = label; setOnClickListener { action() } }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 4 }) }
+    private fun pickZip() { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "application/zip" }, 41) }
+    @Deprecated("Deprecated Android callback retained for compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) { super.onActivityResult(requestCode, resultCode, data); if (requestCode == 41 && resultCode == RESULT_OK) { selected = data?.data; zipEntries = emptyList(); selectedLabel.text = "เลือก ZIP แล้ว: ${selected?.lastPathSegment ?: "ไฟล์ ZIP"}"; setLog("เลือกไฟล์ ZIP แล้ว กดแตก ZIP เพื่อดูรายการ") } }
+    private fun runTask(task: () -> String) { setLog("[RUN] เริ่มงาน"); executor.execute { val result = try { task() } catch (e: Exception) { val msg = e.message ?: e.javaClass.simpleName; "[ERROR] $msg\n[HELP] ${diagnose(msg)}" }; runOnUiThread { setLog(result); if (result.contains("[ERROR]") || result.contains("HTTP ")) showErrorActions(result) } } }
+    private fun showErrorActions(result: String) { AlertDialog.Builder(this).setTitle("ตรวจพบปัญหา").setMessage(result.take(1800)).setPositiveButton("ลองตรวจสิทธิ์ใหม่") { _, _ -> runTask { checkAll() } }.setNeutralButton("เปิด Repository") { _, _ -> openGitHub(repoUrl()) }.setNegativeButton("ปิด", null).show() }
+    private fun values(): Triple<String, String, String> { val t = token.text.toString().trim(); val o = owner.text.toString().trim(); val r = repo.text.toString().trim(); if (t.isEmpty() || o.isEmpty() || r.isEmpty()) throw Exception("กรอก Token, Owner และ Repository ให้ครบในแท็บตั้งค่า"); return Triple(t, o, r) }
+    private fun readZip(): List<ZipEntryData> {
+        val uri = selected ?: throw Exception("กรุณาเลือกไฟล์ ZIP ก่อน")
+        val out = mutableListOf<ZipEntryData>(); contentResolver.openInputStream(uri).use { raw ->
+            if (raw == null) throw Exception("เปิด ZIP ไม่ได้")
+            ZipInputStream(raw).use { zis -> var entry = zis.nextEntry; var total = 0L
+                while (entry != null) { val name = entry.name.replace("\\", "/"); val safe = name.split("/").filter { it.isNotEmpty() }
+                    if (name.startsWith("/") || safe.any { it == ".." } || name.contains(":")) throw Exception("พบ path ที่ไม่ปลอดภัยใน ZIP: $name")
+                    if (!entry.isDirectory && !name.endsWith("/")) { val buffer = ByteArrayOutputStream(); val chunk = ByteArray(8192); while (true) { val n = zis.read(chunk); if (n <= 0) break; total += n; if (total > 150L * 1024 * 1024) throw Exception("ZIP แตกแล้วมีขนาดเกิน 150 MB"); buffer.write(chunk, 0, n) }; out.add(ZipEntryData(name, buffer.toByteArray())); if (out.size > 500) throw Exception("ZIP มีไฟล์เกิน 500 ไฟล์") }
+                    zis.closeEntry(); entry = zis.nextEntry
+                }
+            }
+        }
+        if (out.isEmpty()) throw Exception("ไม่พบไฟล์ใน ZIP"); return out
+    }
+    private fun extractZip(): String { zipEntries = readZip(); workflowFound = zipEntries.any { it.path.replace("\\", "/").contains(".github/workflows/") && (it.path.endsWith(".yml", true) || it.path.endsWith(".yaml", true)) }; if (workflowFound) runOnUiThread { askRelease() }; val listing = zipEntries.take(80).joinToString("\n") { "• ${it.path} (${it.bytes.size} bytes)" }; return "อ่าน ZIP สำเร็จ\nพบ ${zipEntries.size} ไฟล์\n\n$listing" + if (zipEntries.size > 80) "\n…และอีก ${zipEntries.size - 80} ไฟล์" else "" }
+    private fun askRelease() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 4, 24, 0) }
+        val tag = EditText(this).apply { hint = "เว้นว่างให้สร้างรุ่นอัตโนมัติ เช่น v3.0.0"; setSingleLine(true) }
+        val name = EditText(this).apply { hint = "ชื่อ Release (ไม่บังคับ)"; setSingleLine(true) }
+        val notes = EditText(this).apply { hint = "รายละเอียด Release (ไม่บังคับ)"; minLines = 2; gravity = Gravity.TOP }
+        box.addView(tag); box.addView(name); box.addView(notes)
+        AlertDialog.Builder(this).setTitle("พบ GitHub Actions Workflow")
+            .setMessage("พบไฟล์ Workflow สำหรับทำงานอัตโนมัติ ต้องการสร้าง GitHub Release หลังจากนี้หรือไม่?")
+            .setView(box).setNegativeButton("ไม่สร้าง Release", null)
+            .setPositiveButton("สร้าง Release") { _, _ -> runTask { createRelease(tag.text.toString(), name.text.toString(), notes.text.toString()) } }.show()
+    }
+    private fun createRelease(tagInput: String, nameInput: String, notesInput: String): String {
+        val (_, o, r) = values(); val b = branch.text.toString().trim().ifEmpty { "main" }
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+        val tag = tagInput.trim().ifEmpty { "v3.0.0-$stamp" }
+        val title = nameInput.trim().ifEmpty { "GitHub Upload Helper $tag" }
+        val notes = notesInput.trim().ifEmpty { "Release $tag created from Android using GitHub Upload Helper." }
+        val body = JSONObject().put("tag_name", tag).put("target_commitish", b).put("name", title).put("body", notes).put("draft", false).put("prerelease", false)
+        val (code, response) = request("POST", "/repos/${enc(o)}/${enc(r)}/releases", body)
+        if (code !in 200..299) throw Exception("สร้าง Release ไม่สำเร็จ HTTP $code: $response\nต้องมีสิทธิ์ Contents/Metadata ที่เหมาะสม และ Tag ต้องไม่ซ้ำ")
+        val j = JSONObject(response); return "[OK] สร้าง Release สำเร็จ\nTag: $tag\nชื่อ: $title\nURL: ${j.optString("html_url", repoUrl()+"/releases") }"
+    }
+    private fun request(method: String, endpoint: String, body: JSONObject? = null): Pair<Int, String> {
+        val (t, _, _) = values(); val c = URL("https://api.github.com$endpoint").openConnection() as HttpURLConnection
+        c.requestMethod = method; c.connectTimeout = 20000; c.readTimeout = 30000; c.setRequestProperty("Authorization", "Bearer $t"); c.setRequestProperty("Accept", "application/vnd.github+json"); c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+        if (body != null) { c.doOutput = true; c.setRequestProperty("Content-Type", "application/json; charset=utf-8"); c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) } }
+        val code = c.responseCode; val stream = if (code in 200..399) c.inputStream else c.errorStream; val text = stream?.bufferedReader()?.use { it.readText() } ?: ""; c.disconnect(); return code to text
+    }
+    private fun checkAll(): String {
+        val (_, o, r) = values(); val (uc, ub) = request("GET", "/user"); if (uc !in 200..299) throw Exception("Token ตรวจไม่ผ่าน HTTP $uc\n$ub")
+        val username = JSONObject(ub).optString("login", "unknown"); val (rc, rb) = request("GET", "/repos/${enc(o)}/${enc(r)}"); if (rc !in 200..299) throw Exception("อ่าน Repository ไม่สำเร็จ HTTP $rc\n$rb")
+        val rj = JSONObject(rb); repoPermissions = rj.optJSONObject("permissions"); val canPush = repoPermissions?.optBoolean("push", false) ?: false
+        val defaultBranch = rj.optString("default_branch", "main"); val b = branch.text.toString().trim().ifEmpty { defaultBranch }; val (bc, bb) = request("GET", "/repos/${enc(o)}/${enc(r)}/branches/${enc(b)}"); if (bc !in 200..299) throw Exception("ไม่พบ Branch '$b' HTTP $bc\n$bb")
+        return "ตรวจสอบการเข้าถึงผ่าน\nToken account: $username\nRepository: $o/$r\nBranch: $b\nสิทธิ์ push ที่ GitHub รายงาน: ${if (canPush) "มี" else "ไม่มี/ไม่สามารถยืนยันได้"}\n\nหมายเหตุ: การอ่าน Repository สำเร็จไม่ได้ยืนยันสิทธิ์เขียน/ลบทุกกรณี การเขียนทับ/ลบจะตรวจ SHA และตรวจผลจาก API อีกครั้งก่อนรายงานผล"
+    }
+    private fun uploadAll(): String {
+        val (_, o, r) = values(); if (zipEntries.isEmpty()) zipEntries = readZip(); val b = branch.text.toString().trim().ifEmpty { "main" }; val prefix = dest.text.toString().trim().trim('/'); val entries = zipEntries
+        if (!overwrite.isChecked) { val existing = entries.filter { item -> val p = listOf(prefix, item.path).filter { it.isNotBlank() }.joinToString("/"); request("GET", "/repos/${enc(o)}/${enc(r)}/contents/${p.split("/").joinToString("/") { enc(it) }}?ref=${enc(b)}").first in 200..299 }; if (existing.isNotEmpty()) throw Exception("พบไฟล์เดิม ${existing.size} ไฟล์และยังไม่ได้อนุญาตเขียนทับ:\n${existing.take(20).joinToString("\n") { it.path }}\nเปิดตัวเลือกเขียนทับ หากต้องการแทนที่ไฟล์เดิม") }
+        val results = StringBuilder("เริ่มอัปโหลด ${entries.size} ไฟล์\n"); var ok = 0
+        for ((i, item) in entries.withIndex()) {
+            val path = listOf(prefix, item.path).filter { it.isNotBlank() }.joinToString("/"); val endpoint = "/repos/${enc(o)}/${enc(r)}/contents/" + path.split("/").joinToString("/") { enc(it) }
+            val (gc, gb) = request("GET", "$endpoint?ref=${enc(b)}"); val oldSha = if (gc in 200..299) JSONObject(gb).optString("sha").takeIf { it.isNotBlank() } else null
+            if (oldSha != null && !overwrite.isChecked) { results.append("↷ ข้าม ").append(path).append(" — มีไฟล์เดิม\n"); continue }
+            val payload = JSONObject().put("message", message.text.toString().ifBlank { "Upload project from Android" } + " (${i + 1}/${entries.size})").put("content", Base64.encodeToString(item.bytes, Base64.NO_WRAP)).put("branch", b); if (oldSha != null) payload.put("sha", oldSha)
+            val (code, body) = request("PUT", endpoint, payload); if (code in 200..299) { ok++; results.append(if (oldSha == null) "✓ เพิ่ม " else "✓ เขียนทับ ").append(path).append("\n") } else results.append("✗ ").append(path).append(" — HTTP ").append(code).append(": ").append(body.take(180)).append("\n")
+            runOnUiThread { setLog("กำลังอัปโหลด ${i + 1}/${entries.size}\nสำเร็จ $ok ไฟล์") }
+        }
+        return "เสร็จสิ้น: สำเร็จ $ok/${entries.size} ไฟล์\n\n$results"
+    }
+    private fun deleteMatchingFiles(): String {
+        val (_, o, r) = values(); if (zipEntries.isEmpty()) zipEntries = readZip(); val b = branch.text.toString().trim().ifEmpty { "main" }; val prefix = dest.text.toString().trim().trim('/'); val entries = zipEntries
+        val results = StringBuilder("เริ่มลบเป้าหมาย ${entries.size} ไฟล์\n"); var ok = 0
+        for ((i, item) in entries.withIndex()) { val path = listOf(prefix, item.path).filter { it.isNotBlank() }.joinToString("/"); val endpoint = "/repos/${enc(o)}/${enc(r)}/contents/" + path.split("/").joinToString("/") { enc(it) }
+            val (gc, gb) = request("GET", "$endpoint?ref=${enc(b)}"); if (gc == 404) { results.append("↷ ข้าม ").append(path).append(" — ไม่พบไฟล์\n"); continue }; if (gc !in 200..299) { results.append("✗ อ่าน ").append(path).append(" — HTTP ").append(gc).append("\n"); continue }
+            val sha = JSONObject(gb).optString("sha"); if (sha.isBlank()) { results.append("✗ ").append(path).append(" — ไม่พบ SHA\n"); continue }
+            val payload = JSONObject().put("message", message.text.toString().ifBlank { "Delete files from Android" } + " (${i + 1}/${entries.size})").put("sha", sha).put("branch", b); val (code, body) = request("DELETE", endpoint, payload)
+            if (code in 200..299) { ok++; results.append("✓ ลบ ").append(path).append("\n") } else results.append("✗ ").append(path).append(" — HTTP ").append(code).append(": ").append(body.take(180)).append("\n")
+            runOnUiThread { setLog("กำลังลบ ${i + 1}/${entries.size}\nลบสำเร็จ $ok ไฟล์") }
+        }
+        return "เสร็จสิ้น: ลบสำเร็จ $ok/${entries.size} ไฟล์\n\n$results"
+    }
+    private fun repoUrl(): String { val o = owner.text.toString().trim(); val r = repo.text.toString().trim(); return "https://github.com/${o.ifEmpty { "l3lackshine" }}/${r.ifEmpty { "GitHubUploadHelper" }}" }
+    private fun openGitHub(url: String) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+    private fun diagnose(msg: String): String { val m = msg.lowercase(); return when { "401" in m || "bad credentials" in m -> "401: Token ไม่ถูกต้อง หมดอายุ หรือถูกเพิกถอน"; "403" in m || "resource not accessible" in m -> "403: ตรวจ Contents: Read and write, Workflows: Read and write หากแก้ไฟล์ใน .github/workflows และสิทธิ์ Branch protection"; "404" in m || "not found" in m -> "404: ตรวจ Owner, Repository, Branch, path และสิทธิ์ Token"; "409" in m || "sha" in m -> "409: ไฟล์เปลี่ยนระหว่างตรวจหรือ SHA ไม่ตรง ให้ตรวจใหม่แล้วลองอีกครั้ง"; "timeout" in m || "failed to connect" in m -> "เครือข่าย: ตรวจอินเทอร์เน็ตและลองใหม่"; else -> "ตรวจ Token, สิทธิ์ Contents: Read and write, Branch และชื่อ path" } }
+    private fun showHelp() { setLog("""คู่มือสิทธิ์และการใช้งาน
+• Fine-grained Token: เลือก Repository ที่ต้องการ และตั้ง Contents = Read and write
+• หากอัปโหลด/แก้ไฟล์ .github/workflows ให้ตั้ง Workflows = Read and write ด้วย
+• เขียนทับ: เปิดตัวเลือก แล้วแอปจะอ่าน SHA ของไฟล์เดิมก่อนส่ง PUT
+• ลบ: เลือกโหมดลบ แล้วเลือก ZIP ที่มี path ของไฟล์เป้าหมาย ยืนยันก่อนลบ
+• สิทธิ์ push ที่ Repository API รายงานเป็นเพียงสัญญาณเบื้องต้น ไม่รับประกันว่า Token/Branch rules อนุญาตทุกคำสั่ง
+• จำกัด 500 ไฟล์ และขนาดรวมหลังแตก ZIP 150 MB
+• ไม่บันทึก Token ลง SharedPreferences; อย่าแชร์ Token และเพิกถอนทันทีหากหลุด
+• การเขียนทับและลบจะสร้าง commit จริงใน Branch ที่ตั้งไว้""") }
+    private fun setLog(s: String) { if (::log.isInitialized) { val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()); logLines.append("[$time] ").append(s).append("\n\n"); if (logLines.length > 18000) logLines.delete(0, logLines.length - 14000); log.text = logLines.toString(); log.post { val layout = log.layout; if (layout != null) log.scrollTo(0, layout.getLineTop(log.lineCount) - log.height) } } }
+}
