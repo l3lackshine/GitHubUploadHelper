@@ -36,6 +36,7 @@ class MainActivity : Activity() {
     private lateinit var console: TextView
     private val logLines = StringBuilder()
     private var workflowFound = false
+    private var addApkToReleaseWorkflow = false
     private var changedEntries: List<ZipEntryData> = emptyList()
     private lateinit var projectPathLabel: TextView
     private var consoleExpanded = false
@@ -193,12 +194,92 @@ class MainActivity : Activity() {
         val tag = EditText(this).apply { hint = "เว้นว่างให้สร้างรุ่นอัตโนมัติ เช่น v3.0.0"; setSingleLine(true) }
         val name = EditText(this).apply { hint = "ชื่อ Release (ไม่บังคับ)"; setSingleLine(true) }
         val notes = EditText(this).apply { hint = "รายละเอียด Release (ไม่บังคับ)"; minLines = 2; gravity = Gravity.TOP }
-        box.addView(tag); box.addView(name); box.addView(notes)
+        val addApk = CheckBox(this).apply {
+            text = "เพิ่มขั้นตอนแนบ APK เข้า GitHub Release ใน Workflow"
+            isChecked = false
+        }
+        val apkInfo = TextView(this).apply {
+            text = "เลือกช่องนี้แล้วระบบจะปรับ Workflow ในไฟล์ ZIP ให้ทำงานเมื่อมี tag v* และแนบ APK ที่ Build ได้เข้า Release อัตโนมัติ การเปลี่ยนแปลง Workflow จะถูกส่งขึ้นเมื่อกดอัปโหลดไฟล์ ส่วนการสร้าง Release ควรทำหลังอัปโหลด Workflow สำเร็จแล้ว"
+            textSize = 12f
+            setPadding(4, 4, 4, 8)
+        }
+        box.addView(tag); box.addView(name); box.addView(notes); box.addView(addApk); box.addView(apkInfo)
         AlertDialog.Builder(this).setTitle("พบ GitHub Actions Workflow")
-            .setMessage("พบไฟล์ Workflow สำหรับทำงานอัตโนมัติ ต้องการสร้าง GitHub Release หลังจากนี้หรือไม่?")
-            .setView(box).setNegativeButton("ไม่สร้าง Release", null)
-            .setPositiveButton("สร้าง Release") { _, _ -> runTask { createRelease(tag.text.toString(), name.text.toString(), notes.text.toString()) } }.show()
+            .setMessage("พบไฟล์ Workflow สำหรับทำงานอัตโนมัติ ต้องการสร้าง GitHub Release หรือเพิ่มขั้นตอนแนบ APK หรือไม่?")
+            .setView(box).setNegativeButton("ปิด", null)
+            .setNeutralButton("บันทึกตัวเลือก APK", null)
+            .setPositiveButton("สร้าง Release", null)
+            .setOnShowListener {
+                val dlg = (it as AlertDialog)
+                dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                    if (addApk.isChecked) {
+                        try {
+                            patchWorkflowForReleaseApk()
+                            addApkToReleaseWorkflow = true
+                            setLog("[OK] เพิ่มขั้นตอนแนบ APK ใน Workflow แล้วในรายการไฟล์ที่รออัปโหลด\nกรุณาอัปโหลดไฟล์/Commit นี้ก่อน แล้วจึงสร้าง Release ด้วย tag v* เพื่อให้ Workflow ทำงาน")
+                            dlg.dismiss()
+                        } catch (e: Exception) { setLog("[ERROR] เพิ่มขั้นตอน APK ไม่สำเร็จ: ${e.message}") }
+                    } else {
+                        setLog("[INFO] ไม่ได้เลือกเพิ่มขั้นตอนแนบ APK")
+                        dlg.dismiss()
+                    }
+                }
+                dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    if (addApk.isChecked) {
+                        try { patchWorkflowForReleaseApk(); addApkToReleaseWorkflow = true }
+                        catch (e: Exception) { setLog("[ERROR] ปรับ Workflow ไม่สำเร็จ: ${e.message}"); return@setOnClickListener }
+                        dlg.dismiss()
+                        AlertDialog.Builder(this).setTitle("อัปเดต Workflow ก่อนสร้าง Release")
+                            .setMessage("ระบบเพิ่มขั้นตอนแนบ APK ใน Workflow แล้ว ต้องอัปโหลดการเปลี่ยนแปลงนี้ให้สำเร็จก่อน จึงค่อยสร้าง Release/tag เพื่อให้ GitHub Actions ใช้ Workflow รุ่นใหม่\n\nต้องการปิดหน้าต่างนี้และอัปโหลดไฟล์ก่อนหรือไม่?")
+                            .setPositiveButton("ตกลง") { _, _ -> setLog("[INFO] กรุณากดเริ่มอัปโหลดไฟล์ก่อนสร้าง Release") }
+                            .setNegativeButton("ยกเลิก", null).show()
+                    } else {
+                        dlg.dismiss()
+                        runTask { createRelease(tag.text.toString(), name.text.toString(), notes.text.toString()) }
+                    }
+                }
+            }.show()
     }
+    private fun patchWorkflowForReleaseApk() {
+        val idx = zipEntries.indexOfFirst { it.path.replace("\\", "/").contains(".github/workflows/") && (it.path.endsWith(".yml", true) || it.path.endsWith(".yaml", true)) }
+        if (idx < 0) throw Exception("ไม่พบไฟล์ .github/workflows/*.yml หรือ *.yaml ใน ZIP")
+        val entry = zipEntries[idx]
+        var yaml = entry.bytes.toString(Charsets.UTF_8)
+        if (yaml.contains("softprops/action-gh-release") && yaml.contains("app/build/outputs/apk")) {
+            setLog("[INFO] Workflow มีขั้นตอนแนบ APK เข้า Release อยู่แล้ว")
+            return
+        }
+        // Ensure tag pushes trigger the workflow and grant release creation permission.
+        if (!Regex("(?m)^\\s*tags\\s*:").containsMatchIn(yaml)) {
+            val pushPattern = Regex("(?m)^(\\s*)push\\s*:\s*$")
+            yaml = if (pushPattern.containsMatchIn(yaml)) {
+                pushPattern.replaceFirst(yaml) { m -> m.value + "\n" + m.groupValues[1] + "  tags: [ 'v*' ]" }
+            } else {
+                yaml.replaceFirst(Regex("(?m)^on\\s*:\s*$"), "on:\n  push:\n    tags: [ 'v*' ]")
+            }
+        }
+        if (Regex("(?m)^permissions\\s*:").containsMatchIn(yaml)) {
+            yaml = yaml.replaceFirst(Regex("(?ms)^permissions\\s*:\s*\\n(?:[ \t]+[^\\n]*\\n)*"), "permissions:\n  contents: write\n")
+        } else {
+            yaml = yaml.replaceFirst(Regex("(?m)^jobs\\s*:"), "permissions:\n  contents: write\n\njobs:")
+        }
+        val step = """      - name: Publish APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: GitHub Upload Helper ${'$'}{{ github.ref_name }}
+          generate_release_notes: true
+          files: app/build/outputs/apk/debug/app-debug.apk
+"""
+        if (!yaml.contains("softprops/action-gh-release")) {
+            yaml = yaml.trimEnd() + "\n" + step
+        }
+        val patched = ZipEntryData(entry.path, yaml.toByteArray(Charsets.UTF_8))
+        zipEntries = zipEntries.toMutableList().also { it[idx] = patched }
+        changedEntries = (changedEntries.filterNot { it.path == entry.path } + patched)
+        getSharedPreferences("repo_settings", MODE_PRIVATE).edit().putString("last_diff_report", "เพิ่มขั้นตอนแนบ APK ใน Workflow: ${entry.path}\nไฟล์นี้ถูกทำเครื่องหมายเป็นไฟล์เปลี่ยนแปลงและจะถูกส่งขึ้นเมื่อเริ่มอัปโหลดไฟล์\n\nหมายเหตุ: สร้าง Release/tag v* หลัง Workflow นี้ถูกอัปโหลดสำเร็จแล้ว").apply()
+    }
+
     private fun createRelease(tagInput: String, nameInput: String, notesInput: String): String {
         val (_, o, r) = values(); val b = branch.text.toString().trim().ifEmpty { "main" }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
