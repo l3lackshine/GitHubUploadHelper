@@ -16,6 +16,8 @@ import java.util.Locale
 import android.widget.*
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.security.MessageDigest
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -34,6 +36,9 @@ class MainActivity : Activity() {
     private lateinit var console: TextView
     private val logLines = StringBuilder()
     private var workflowFound = false
+    private var changedEntries: List<ZipEntryData> = emptyList()
+    private lateinit var projectPathLabel: TextView
+    private var consoleExpanded = false
     private lateinit var selectedLabel: TextView
     private lateinit var settingsPanel: LinearLayout
     private lateinit var uploadPanel: LinearLayout
@@ -49,7 +54,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("repo_settings", MODE_PRIVATE)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(14, 12, 14, 12); setBackgroundColor(0xFFF3F5F9.toInt()) }
-        val header = TextView(this).apply { text = "GitHub Upload Helper 3.0"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
+        val header = TextView(this).apply { text = "GitHub Upload Helper 3.1"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
         root.addView(header)
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         root.addView(tabs)
@@ -57,12 +62,12 @@ class MainActivity : Activity() {
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        val consoleTitle = TextView(this).apply { text = "CONSOLE / LOG"; textSize = 13f; typeface = Typeface.MONOSPACE; setTextColor(0xFF9BE7A5.toInt()); setPadding(10, 7, 10, 2); setBackgroundColor(0xFF20242B.toInt()) }
-        root.addView(consoleTitle)
-        log = TextView(this).apply { text = "[READY] พร้อมใช้งาน"; textSize = 12f; typeface = Typeface.MONOSPACE; movementMethod = ScrollingMovementMethod(); setTextColor(0xFFE7F3E8.toInt()); setPadding(10, 8, 10, 8); setBackgroundColor(0xFF20242B.toInt()); minHeight = 110; maxHeight = 230 }
-        root.addView(log, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 0 })
-        val clearLog = Button(this).apply { text = "ล้าง Log"; setOnClickListener { logLines.clear(); setLog("[READY] ล้าง Log แล้ว") } }
-        root.addView(clearLog)
+        val consoleTitle = Button(this).apply { text = "▶ CONSOLE / LOG (แตะเพื่อขยาย)"; textSize = 12f; typeface = Typeface.MONOSPACE; setTextColor(0xFF9BE7A5.toInt()); setBackgroundColor(0xFF20242B.toInt()); setOnClickListener { consoleExpanded = !consoleExpanded; log.visibility = if (consoleExpanded) View.VISIBLE else View.GONE; text = if (consoleExpanded) "▼ CONSOLE / LOG (แตะเพื่อย่อ)" else "▶ CONSOLE / LOG (แตะเพื่อขยาย)" } }
+        root.addView(consoleTitle, LinearLayout.LayoutParams(-1, 42))
+        log = TextView(this).apply { text = "[READY] พร้อมใช้งาน"; textSize = 11f; typeface = Typeface.MONOSPACE; movementMethod = ScrollingMovementMethod(); setTextColor(0xFFE7F3E8.toInt()); setPadding(8, 5, 8, 5); setBackgroundColor(0xFF20242B.toInt()); maxHeight = 125; visibility = View.GONE }
+        root.addView(log, LinearLayout.LayoutParams(-1, -2))
+        val clearLog = Button(this).apply { text = "ล้าง Log"; textSize = 11f; minHeight = 36; setOnClickListener { logLines.clear(); setLog("[READY] ล้าง Log แล้ว") } }
+        root.addView(clearLog, LinearLayout.LayoutParams(-1, 38))
         setContentView(root)
 
         settingsPanel = panel(content)
@@ -87,6 +92,8 @@ class MainActivity : Activity() {
         button(settingsPanel, "เปิดหน้า Releases") { openGitHub(repoUrl() + "/releases") }
 
         uploadPanel.addView(TextView(this).apply { text = "อัปโหลด / เขียนทับ / ลบไฟล์"; textSize = 19f; setTextColor(0xFF172554.toInt()); setPadding(2, 8, 2, 4) })
+        projectPathLabel = TextView(this).apply { text = "โฟลเดอร์โปรเจกต์ในเครื่อง: จะสร้างเมื่อแตก ZIP ครั้งแรก"; textSize = 12f; setPadding(6, 6, 6, 6); setBackgroundColor(0xFFE4EAF3.toInt()) }
+        uploadPanel.addView(projectPathLabel)
         dest = field(uploadPanel, "โฟลเดอร์ปลายทางใน GitHub (ไม่บังคับ)", "")
         message = field(uploadPanel, "ข้อความ Commit", "").apply { setText("Upload project from Android") }
         overwrite = CheckBox(this).apply { text = "อนุญาตเขียนทับไฟล์ที่มีอยู่ใน GitHub"; isChecked = false }
@@ -97,7 +104,8 @@ class MainActivity : Activity() {
         button(uploadPanel, "1. เลือกไฟล์ ZIP") { pickZip() }
         selectedLabel = TextView(this).apply { text = "ยังไม่ได้เลือก ZIP"; textSize = 14f; setPadding(8, 10, 8, 10); setBackgroundColor(0xFFFFFFFF.toInt()) }
         uploadPanel.addView(selectedLabel)
-        button(uploadPanel, "2. แตก ZIP และแสดงรายการไฟล์") { runTask { extractZip() } }
+        button(uploadPanel, "2. แตก ZIP ลงโฟลเดอร์โปรเจกต์ในเครื่อง และเทียบความเปลี่ยนแปลง") { runTask { extractZip() } }
+        button(uploadPanel, "เปิดดูรายงานความเปลี่ยนแปลง") { showDiffReport() }
         button(uploadPanel, "3. ตรวจสิทธิ์ก่อนดำเนินการ") { runTask { checkAll() } }
         button(uploadPanel, "4. เริ่มทำรายการตามโหมดที่เลือก") {
             if (deleteMode.isChecked) AlertDialog.Builder(this).setTitle("ยืนยันลบไฟล์ใน GitHub")
@@ -117,6 +125,7 @@ class MainActivity : Activity() {
         fun tab(label: String, target: LinearLayout) { tabs.addView(Button(this).apply { text = label; textSize = 11f; setOnClickListener { settingsPanel.visibility = View.GONE; uploadPanel.visibility = View.GONE; linksPanel.visibility = View.GONE; target.visibility = View.VISIBLE } }, LinearLayout.LayoutParams(0, -2, 1f)) }
         tab("ตั้งค่า Repository", settingsPanel); tab("อัปโหลดไฟล์", uploadPanel); tab("ทางลัด GitHub", linksPanel)
         settingsPanel.visibility = View.VISIBLE; uploadPanel.visibility = View.GONE; linksPanel.visibility = View.GONE
+        updateProjectPathLabel()
     }
 
     private fun panel(parent: LinearLayout) = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(4, 4, 4, 8); parent.addView(this) }
@@ -146,7 +155,39 @@ class MainActivity : Activity() {
         }
         if (out.isEmpty()) throw Exception("ไม่พบไฟล์ใน ZIP"); return out
     }
-    private fun extractZip(): String { zipEntries = readZip(); workflowFound = zipEntries.any { it.path.replace("\\", "/").contains(".github/workflows/") && (it.path.endsWith(".yml", true) || it.path.endsWith(".yaml", true)) }; if (workflowFound) runOnUiThread { askRelease() }; val listing = zipEntries.take(80).joinToString("\n") { "• ${it.path} (${it.bytes.size} bytes)" }; return "อ่าน ZIP สำเร็จ\nพบ ${zipEntries.size} ไฟล์\n\n$listing" + if (zipEntries.size > 80) "\n…และอีก ${zipEntries.size - 80} ไฟล์" else "" }
+    private fun projectDir(): File {
+        val (_, o, r) = values()
+        val safeOwner = o.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        val safeRepo = r.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        return File(File(filesDir, "projects/$safeOwner"), safeRepo)
+    }
+    private fun updateProjectPathLabel() { if (::projectPathLabel.isInitialized) projectPathLabel.text = "โฟลเดอร์โปรเจกต์ในเครื่อง: ${projectDirForLabel()}\nระบบจะเก็บไว้ใช้ครั้งต่อไป" }
+    private fun projectDirForLabel(): String { val o = owner.text.toString().trim().ifEmpty { "owner" }.replace(Regex("[^A-Za-z0-9_.-]"), "_"); val r = repo.text.toString().trim().ifEmpty { "repository" }.replace(Regex("[^A-Za-z0-9_.-]"), "_"); return File(File(filesDir, "projects/$o"), r).absolutePath }
+    private fun sha(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    private fun extractZip(): String {
+        val rawEntries = readZip()
+        // Remove a single common wrapper folder, e.g. GitHubUploadHelper-main/.
+        val firstParts = rawEntries.map { it.path.trim('/').substringBefore('/') }.distinct()
+        val entries = if (firstParts.size == 1 && rawEntries.all { it.path.contains('/') } && !rawEntries.any { it.path.trim('/') == firstParts[0] }) rawEntries.map { it.copy(path = it.path.substringAfter('/')) } else rawEntries
+        val dir = projectDir(); if (!dir.exists() && !dir.mkdirs()) throw Exception("สร้างโฟลเดอร์โปรเจกต์ในเครื่องไม่ได้: ${dir.absolutePath}")
+        val before = dir.walkTopDown().filter { it.isFile }.associate { it.relativeTo(dir).invariantSeparatorsPath to it.readBytes() }
+        val incoming = entries.associate { it.path.trimStart('/') to it.bytes }
+        val added = incoming.keys.filter { it !in before }
+        val changed = incoming.keys.filter { it in before && sha(before.getValue(it)) != sha(incoming.getValue(it)) }
+        val same = incoming.keys.filter { it in before && sha(before.getValue(it)) == sha(incoming.getValue(it)) }
+        val removed = before.keys.filter { it !in incoming }
+        for ((path, bytes) in incoming) { val out = File(dir, path); if (!out.canonicalPath.startsWith(dir.canonicalPath + File.separator)) throw Exception("path ไม่ปลอดภัย: $path"); out.parentFile?.mkdirs(); out.writeBytes(bytes) }
+        zipEntries = entries.map { ZipEntryData(it.path.trimStart('/'), it.bytes) }
+        changedEntries = zipEntries.filter { it.path in added || it.path in changed }
+        getSharedPreferences("repo_settings", MODE_PRIVATE).edit().putString("project_dir_${owner.text.toString().trim()}_${repo.text.toString().trim()}", dir.absolutePath).apply()
+        workflowFound = zipEntries.any { it.path.replace("\\", "/").contains(".github/workflows/") && (it.path.endsWith(".yml", true) || it.path.endsWith(".yaml", true)) }
+        if (workflowFound) runOnUiThread { askRelease() }
+        updateProjectPathLabel()
+        val report = "แตก ZIP ลงโฟลเดอร์: ${dir.absolutePath}\nไฟล์ใหม่: ${added.size}\nไฟล์เปลี่ยน: ${changed.size}\nไฟล์ไม่เปลี่ยน: ${same.size}\nไฟล์เดิมที่ไม่มีใน ZIP: ${removed.size} (ไม่ลบอัตโนมัติ)\n\nไฟล์ที่จะอัปโหลดเมื่อเลือกอัปโหลดเฉพาะที่เปลี่ยน: ${changedEntries.size}"
+        getSharedPreferences("repo_settings", MODE_PRIVATE).edit().putString("last_diff_report", report + "\n\nไฟล์ใหม่/เปลี่ยน:\n" + (added + changed).take(150).joinToString("\n")).apply()
+        return "[OK] ตรวจ ZIP และซิงก์โฟลเดอร์โปรเจกต์แล้ว\n$report\n\nกด ‘เปิดดูรายงานความเปลี่ยนแปลง’ เพื่อดูรายชื่อไฟล์"
+    }
+    private fun showDiffReport() { val report = getSharedPreferences("repo_settings", MODE_PRIVATE).getString("last_diff_report", "ยังไม่มีรายงาน กรุณาเลือก ZIP แล้วแตก ZIP ก่อน") ?: "ยังไม่มีรายงาน"; AlertDialog.Builder(this).setTitle("เปรียบเทียบไฟล์โปรเจกต์").setMessage(report).setPositiveButton("ตกลง", null).show() }
     private fun askRelease() {
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 4, 24, 0) }
         val tag = EditText(this).apply { hint = "เว้นว่างให้สร้างรุ่นอัตโนมัติ เช่น v3.0.0"; setSingleLine(true) }
@@ -183,7 +224,8 @@ class MainActivity : Activity() {
         return "ตรวจสอบการเข้าถึงผ่าน\nToken account: $username\nRepository: $o/$r\nBranch: $b\nสิทธิ์ push ที่ GitHub รายงาน: ${if (canPush) "มี" else "ไม่มี/ไม่สามารถยืนยันได้"}\n\nหมายเหตุ: การอ่าน Repository สำเร็จไม่ได้ยืนยันสิทธิ์เขียน/ลบทุกกรณี การเขียนทับ/ลบจะตรวจ SHA และตรวจผลจาก API อีกครั้งก่อนรายงานผล"
     }
     private fun uploadAll(): String {
-        val (_, o, r) = values(); if (zipEntries.isEmpty()) zipEntries = readZip(); val b = branch.text.toString().trim().ifEmpty { "main" }; val prefix = dest.text.toString().trim().trim('/'); val entries = zipEntries
+        val (_, o, r) = values(); if (zipEntries.isEmpty()) zipEntries = readZip(); val b = branch.text.toString().trim().ifEmpty { "main" }; val prefix = dest.text.toString().trim().trim('/'); val entries = if (changedEntries.isNotEmpty()) changedEntries else zipEntries
+        if (changedEntries.isEmpty() && zipEntries.isNotEmpty()) throw Exception("ไม่พบไฟล์ใหม่หรือเปลี่ยนแปลงใน ZIP เมื่อเทียบกับโฟลเดอร์โปรเจกต์ในเครื่อง\nหากเป็นการอัปโหลดครั้งแรก ให้แตก ZIP ก่อน แล้วตรวจอีกครั้ง")
         if (!overwrite.isChecked) { val existing = entries.filter { item -> val p = listOf(prefix, item.path).filter { it.isNotBlank() }.joinToString("/"); request("GET", "/repos/${enc(o)}/${enc(r)}/contents/${p.split("/").joinToString("/") { enc(it) }}?ref=${enc(b)}").first in 200..299 }; if (existing.isNotEmpty()) throw Exception("พบไฟล์เดิม ${existing.size} ไฟล์และยังไม่ได้อนุญาตเขียนทับ:\n${existing.take(20).joinToString("\n") { it.path }}\nเปิดตัวเลือกเขียนทับ หากต้องการแทนที่ไฟล์เดิม") }
         val results = StringBuilder("เริ่มอัปโหลด ${entries.size} ไฟล์\n"); var ok = 0
         for ((i, item) in entries.withIndex()) {
