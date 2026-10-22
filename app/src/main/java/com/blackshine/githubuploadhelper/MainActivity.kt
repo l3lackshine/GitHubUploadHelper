@@ -8,6 +8,11 @@ import android.net.Uri
 import android.util.Base64
 import android.view.Gravity
 import android.view.View
+import android.graphics.Typeface
+import android.text.method.ScrollingMovementMethod
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import android.widget.*
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -26,6 +31,9 @@ class MainActivity : Activity() {
     private lateinit var dest: EditText
     private lateinit var message: EditText
     private lateinit var log: TextView
+    private lateinit var console: TextView
+    private val logLines = StringBuilder()
+    private var workflowFound = false
     private lateinit var selectedLabel: TextView
     private lateinit var settingsPanel: LinearLayout
     private lateinit var uploadPanel: LinearLayout
@@ -41,7 +49,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("repo_settings", MODE_PRIVATE)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(14, 12, 14, 12); setBackgroundColor(0xFFF3F5F9.toInt()) }
-        val header = TextView(this).apply { text = "GitHub Upload Helper 2.0"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
+        val header = TextView(this).apply { text = "GitHub Upload Helper 3.0"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
         root.addView(header)
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         root.addView(tabs)
@@ -49,18 +57,22 @@ class MainActivity : Activity() {
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        log = TextView(this).apply { text = "สถานะ: พร้อมใช้งาน"; textSize = 13f; setTextColor(0xFF111827.toInt()); setPadding(10, 10, 10, 10); setBackgroundColor(0xFFFFFFFF.toInt()) }
-        root.addView(log, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 8 })
+        val consoleTitle = TextView(this).apply { text = "CONSOLE / LOG"; textSize = 13f; typeface = Typeface.MONOSPACE; setTextColor(0xFF9BE7A5.toInt()); setPadding(10, 7, 10, 2); setBackgroundColor(0xFF20242B.toInt()) }
+        root.addView(consoleTitle)
+        log = TextView(this).apply { text = "[READY] พร้อมใช้งาน"; textSize = 12f; typeface = Typeface.MONOSPACE; movementMethod = ScrollingMovementMethod(); setTextColor(0xFFE7F3E8.toInt()); setPadding(10, 8, 10, 8); setBackgroundColor(0xFF20242B.toInt()); minHeight = 110; maxHeight = 230 }
+        root.addView(log, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 0 })
+        val clearLog = Button(this).apply { text = "ล้าง Log"; setOnClickListener { logLines.clear(); setLog("[READY] ล้าง Log แล้ว") } }
+        root.addView(clearLog)
         setContentView(root)
 
         settingsPanel = panel(content)
         uploadPanel = panel(content)
         linksPanel = panel(content)
 
-        token = field(settingsPanel, "GitHub Personal Access Token", "วาง Token ที่นี่").apply { inputType = 129 }
-        owner = field(settingsPanel, "Owner / Username", "เช่น l3lackshine").apply { setText(prefs.getString("owner", "")) }
-        repo = field(settingsPanel, "Repository", "เช่น GitHubUploadHelper").apply { setText(prefs.getString("repo", "")) }
-        branch = field(settingsPanel, "Branch", "main").apply { setText(prefs.getString("branch", "main")) }
+        token = field(settingsPanel, "GitHub Personal Access Token", "").apply { inputType = 129 }
+        owner = field(settingsPanel, "Owner / Username", "").apply { setText(prefs.getString("owner", "")) }
+        repo = field(settingsPanel, "Repository", "").apply { setText(prefs.getString("repo", "")) }
+        branch = field(settingsPanel, "Branch", "").apply { setText(prefs.getString("branch", "main")) }
         button(settingsPanel, "บันทึกการตั้งค่า Repository") {
             prefs.edit().putString("owner", owner.text.toString().trim()).putString("repo", repo.text.toString().trim()).putString("branch", branch.text.toString().trim()).apply()
             setLog("บันทึก Owner / Repository / Branch แล้ว (ไม่ได้บันทึก Token เพื่อความปลอดภัย)")
@@ -75,8 +87,8 @@ class MainActivity : Activity() {
         button(settingsPanel, "เปิดหน้า Releases") { openGitHub(repoUrl() + "/releases") }
 
         uploadPanel.addView(TextView(this).apply { text = "อัปโหลด / เขียนทับ / ลบไฟล์"; textSize = 19f; setTextColor(0xFF172554.toInt()); setPadding(2, 8, 2, 4) })
-        dest = field(uploadPanel, "โฟลเดอร์ปลายทางใน GitHub (ไม่บังคับ)", "เว้นว่างเพื่อใช้โครงสร้างใน ZIP")
-        message = field(uploadPanel, "ข้อความ Commit", "Upload project from Android").apply { setText("Upload project from Android") }
+        dest = field(uploadPanel, "โฟลเดอร์ปลายทางใน GitHub (ไม่บังคับ)", "")
+        message = field(uploadPanel, "ข้อความ Commit", "").apply { setText("Upload project from Android") }
         overwrite = CheckBox(this).apply { text = "อนุญาตเขียนทับไฟล์ที่มีอยู่ใน GitHub"; isChecked = false }
         uploadPanel.addView(overwrite)
         deleteMode = CheckBox(this).apply { text = "โหมดลบไฟล์: ลบไฟล์ใน GitHub ที่มี path ตรงกับไฟล์ใน ZIP (ไม่อัปโหลด)"; isChecked = false }
@@ -110,14 +122,15 @@ class MainActivity : Activity() {
     private fun panel(parent: LinearLayout) = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(4, 4, 4, 8); parent.addView(this) }
     private fun field(parent: LinearLayout, label: String, hint: String): EditText {
         parent.addView(TextView(this).apply { text = label; textSize = 14f; setPadding(2, 9, 2, 3) })
-        val e = EditText(this).apply { this.hint = hint; textSize = 15f; setSingleLine(true); setPadding(12, 8, 12, 8); setBackgroundColor(0xFFFFFFFF.toInt()) }
+        val e = EditText(this).apply { this.hint = ""; textSize = 15f; setSingleLine(true); setPadding(12, 8, 12, 8); setBackgroundColor(0xFFFFFFFF.toInt()) }
         parent.addView(e, LinearLayout.LayoutParams(-1, -2)); return e
     }
     private fun button(parent: LinearLayout, label: String, action: () -> Unit) { parent.addView(Button(this).apply { text = label; setOnClickListener { action() } }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 4 }) }
     private fun pickZip() { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "application/zip" }, 41) }
     @Deprecated("Deprecated Android callback retained for compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) { super.onActivityResult(requestCode, resultCode, data); if (requestCode == 41 && resultCode == RESULT_OK) { selected = data?.data; zipEntries = emptyList(); selectedLabel.text = "เลือก ZIP แล้ว: ${selected?.lastPathSegment ?: "ไฟล์ ZIP"}"; setLog("เลือกไฟล์ ZIP แล้ว กดแตก ZIP เพื่อดูรายการ") } }
-    private fun runTask(task: () -> String) { setLog("กำลังทำงาน…"); executor.execute { val result = try { task() } catch (e: Exception) { "ผิดพลาด: ${e.message ?: e.javaClass.simpleName}\n\n${diagnose(e.message ?: "")}" }; runOnUiThread { setLog(result) } } }
+    private fun runTask(task: () -> String) { setLog("[RUN] เริ่มงาน"); executor.execute { val result = try { task() } catch (e: Exception) { val msg = e.message ?: e.javaClass.simpleName; "[ERROR] $msg\n[HELP] ${diagnose(msg)}" }; runOnUiThread { setLog(result); if (result.contains("[ERROR]") || result.contains("HTTP ")) showErrorActions(result) } } }
+    private fun showErrorActions(result: String) { AlertDialog.Builder(this).setTitle("ตรวจพบปัญหา").setMessage(result.take(1800)).setPositiveButton("ลองตรวจสิทธิ์ใหม่") { _, _ -> runTask { checkAll() } }.setNeutralButton("เปิด Repository") { _, _ -> openGitHub(repoUrl()) }.setNegativeButton("ปิด", null).show() }
     private fun values(): Triple<String, String, String> { val t = token.text.toString().trim(); val o = owner.text.toString().trim(); val r = repo.text.toString().trim(); if (t.isEmpty() || o.isEmpty() || r.isEmpty()) throw Exception("กรอก Token, Owner และ Repository ให้ครบในแท็บตั้งค่า"); return Triple(t, o, r) }
     private fun readZip(): List<ZipEntryData> {
         val uri = selected ?: throw Exception("กรุณาเลือกไฟล์ ZIP ก่อน")
@@ -133,7 +146,29 @@ class MainActivity : Activity() {
         }
         if (out.isEmpty()) throw Exception("ไม่พบไฟล์ใน ZIP"); return out
     }
-    private fun extractZip(): String { zipEntries = readZip(); val listing = zipEntries.take(80).joinToString("\n") { "• ${it.path} (${it.bytes.size} bytes)" }; return "อ่าน ZIP สำเร็จ\nพบ ${zipEntries.size} ไฟล์\n\n$listing" + if (zipEntries.size > 80) "\n…และอีก ${zipEntries.size - 80} ไฟล์" else "" }
+    private fun extractZip(): String { zipEntries = readZip(); workflowFound = zipEntries.any { it.path.replace("\\", "/").contains(".github/workflows/") && (it.path.endsWith(".yml", true) || it.path.endsWith(".yaml", true)) }; if (workflowFound) runOnUiThread { askRelease() }; val listing = zipEntries.take(80).joinToString("\n") { "• ${it.path} (${it.bytes.size} bytes)" }; return "อ่าน ZIP สำเร็จ\nพบ ${zipEntries.size} ไฟล์\n\n$listing" + if (zipEntries.size > 80) "\n…และอีก ${zipEntries.size - 80} ไฟล์" else "" }
+    private fun askRelease() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 4, 24, 0) }
+        val tag = EditText(this).apply { hint = "เว้นว่างให้สร้างรุ่นอัตโนมัติ เช่น v3.0.0"; setSingleLine(true) }
+        val name = EditText(this).apply { hint = "ชื่อ Release (ไม่บังคับ)"; setSingleLine(true) }
+        val notes = EditText(this).apply { hint = "รายละเอียด Release (ไม่บังคับ)"; minLines = 2; gravity = Gravity.TOP }
+        box.addView(tag); box.addView(name); box.addView(notes)
+        AlertDialog.Builder(this).setTitle("พบ GitHub Actions Workflow")
+            .setMessage("พบไฟล์ Workflow สำหรับทำงานอัตโนมัติ ต้องการสร้าง GitHub Release หลังจากนี้หรือไม่?")
+            .setView(box).setNegativeButton("ไม่สร้าง Release", null)
+            .setPositiveButton("สร้าง Release") { _, _ -> runTask { createRelease(tag.text.toString(), name.text.toString(), notes.text.toString()) } }.show()
+    }
+    private fun createRelease(tagInput: String, nameInput: String, notesInput: String): String {
+        val (_, o, r) = values(); val b = branch.text.toString().trim().ifEmpty { "main" }
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+        val tag = tagInput.trim().ifEmpty { "v3.0.0-$stamp" }
+        val title = nameInput.trim().ifEmpty { "GitHub Upload Helper $tag" }
+        val notes = notesInput.trim().ifEmpty { "Release $tag created from Android using GitHub Upload Helper." }
+        val body = JSONObject().put("tag_name", tag).put("target_commitish", b).put("name", title).put("body", notes).put("draft", false).put("prerelease", false)
+        val (code, response) = request("POST", "/repos/${enc(o)}/${enc(r)}/releases", body)
+        if (code !in 200..299) throw Exception("สร้าง Release ไม่สำเร็จ HTTP $code: $response\nต้องมีสิทธิ์ Contents/Metadata ที่เหมาะสม และ Tag ต้องไม่ซ้ำ")
+        val j = JSONObject(response); return "[OK] สร้าง Release สำเร็จ\nTag: $tag\nชื่อ: $title\nURL: ${j.optString("html_url", repoUrl()+"/releases") }"
+    }
     private fun request(method: String, endpoint: String, body: JSONObject? = null): Pair<Int, String> {
         val (t, _, _) = values(); val c = URL("https://api.github.com$endpoint").openConnection() as HttpURLConnection
         c.requestMethod = method; c.connectTimeout = 20000; c.readTimeout = 30000; c.setRequestProperty("Authorization", "Bearer $t"); c.setRequestProperty("Accept", "application/vnd.github+json"); c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
@@ -186,5 +221,5 @@ class MainActivity : Activity() {
 • จำกัด 500 ไฟล์ และขนาดรวมหลังแตก ZIP 150 MB
 • ไม่บันทึก Token ลง SharedPreferences; อย่าแชร์ Token และเพิกถอนทันทีหากหลุด
 • การเขียนทับและลบจะสร้าง commit จริงใน Branch ที่ตั้งไว้""") }
-    private fun setLog(s: String) { if (::log.isInitialized) log.text = s }
+    private fun setLog(s: String) { if (::log.isInitialized) { val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()); logLines.append("[$time] ").append(s).append("\n\n"); if (logLines.length > 18000) logLines.delete(0, logLines.length - 14000); log.text = logLines.toString(); log.post { val layout = log.layout; if (layout != null) log.scrollTo(0, layout.getLineTop(log.lineCount) - log.height) } } }
 }
