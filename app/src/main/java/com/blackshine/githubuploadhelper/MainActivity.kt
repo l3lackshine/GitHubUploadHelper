@@ -54,7 +54,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("repo_settings", MODE_PRIVATE)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(14, 12, 14, 12); setBackgroundColor(0xFFF3F5F9.toInt()) }
-        val header = TextView(this).apply { text = "GitHub Upload Helper 3.1"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
+        val header = TextView(this).apply { text = "GitHub Upload Helper 3.2"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
         root.addView(header)
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         root.addView(tabs)
@@ -62,9 +62,9 @@ class MainActivity : Activity() {
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        val consoleTitle = Button(this).apply { text = "▶ CONSOLE / LOG (แตะเพื่อขยาย)"; textSize = 12f; typeface = Typeface.MONOSPACE; setTextColor(0xFF9BE7A5.toInt()); setBackgroundColor(0xFF20242B.toInt()); setOnClickListener { consoleExpanded = !consoleExpanded; log.visibility = if (consoleExpanded) View.VISIBLE else View.GONE; text = if (consoleExpanded) "▼ CONSOLE / LOG (แตะเพื่อย่อ)" else "▶ CONSOLE / LOG (แตะเพื่อขยาย)" } }
+        val consoleTitle = Button(this).apply { text = "▶ CONSOLE / LOG (แตะเพื่อขยาย)"; textSize = 12f; typeface = Typeface.MONOSPACE; setTextColor(0xFF9BE7A5.toInt()); setBackgroundColor(0xFF20242B.toInt()); setOnClickListener { consoleExpanded = !consoleExpanded; log.visibility = View.VISIBLE; log.maxHeight = if (consoleExpanded) 260 else 76; text = if (consoleExpanded) "▼ CONSOLE / LOG (แตะเพื่อย่อ)" else "▶ CONSOLE / LOG (แตะเพื่อขยาย)" } }
         root.addView(consoleTitle, LinearLayout.LayoutParams(-1, 42))
-        log = TextView(this).apply { text = "[READY] พร้อมใช้งาน"; textSize = 11f; typeface = Typeface.MONOSPACE; movementMethod = ScrollingMovementMethod(); setTextColor(0xFFE7F3E8.toInt()); setPadding(8, 5, 8, 5); setBackgroundColor(0xFF20242B.toInt()); maxHeight = 125; visibility = View.GONE }
+        log = TextView(this).apply { text = "[READY] พร้อมใช้งาน"; textSize = 11f; typeface = Typeface.MONOSPACE; movementMethod = ScrollingMovementMethod(); setTextColor(0xFFE7F3E8.toInt()); setPadding(8, 5, 8, 5); setBackgroundColor(0xFF20242B.toInt()); maxHeight = 76; visibility = View.VISIBLE }
         root.addView(log, LinearLayout.LayoutParams(-1, -2))
         val clearLog = Button(this).apply { text = "ล้าง Log"; textSize = 11f; minHeight = 36; setOnClickListener { logLines.clear(); setLog("[READY] ล้าง Log แล้ว") } }
         root.addView(clearLog, LinearLayout.LayoutParams(-1, 38))
@@ -224,19 +224,62 @@ class MainActivity : Activity() {
         return "ตรวจสอบการเข้าถึงผ่าน\nToken account: $username\nRepository: $o/$r\nBranch: $b\nสิทธิ์ push ที่ GitHub รายงาน: ${if (canPush) "มี" else "ไม่มี/ไม่สามารถยืนยันได้"}\n\nหมายเหตุ: การอ่าน Repository สำเร็จไม่ได้ยืนยันสิทธิ์เขียน/ลบทุกกรณี การเขียนทับ/ลบจะตรวจ SHA และตรวจผลจาก API อีกครั้งก่อนรายงานผล"
     }
     private fun uploadAll(): String {
-        val (_, o, r) = values(); if (zipEntries.isEmpty()) zipEntries = readZip(); val b = branch.text.toString().trim().ifEmpty { "main" }; val prefix = dest.text.toString().trim().trim('/'); val entries = if (changedEntries.isNotEmpty()) changedEntries else zipEntries
+        val (_, o, r) = values()
+        if (zipEntries.isEmpty()) zipEntries = readZip()
+        val b = branch.text.toString().trim().ifEmpty { "main" }
+        val prefix = dest.text.toString().trim().trim('/')
+        val entries = if (changedEntries.isNotEmpty()) changedEntries else zipEntries
         if (changedEntries.isEmpty() && zipEntries.isNotEmpty()) throw Exception("ไม่พบไฟล์ใหม่หรือเปลี่ยนแปลงใน ZIP เมื่อเทียบกับโฟลเดอร์โปรเจกต์ในเครื่อง\nหากเป็นการอัปโหลดครั้งแรก ให้แตก ZIP ก่อน แล้วตรวจอีกครั้ง")
-        if (!overwrite.isChecked) { val existing = entries.filter { item -> val p = listOf(prefix, item.path).filter { it.isNotBlank() }.joinToString("/"); request("GET", "/repos/${enc(o)}/${enc(r)}/contents/${p.split("/").joinToString("/") { enc(it) }}?ref=${enc(b)}").first in 200..299 }; if (existing.isNotEmpty()) throw Exception("พบไฟล์เดิม ${existing.size} ไฟล์และยังไม่ได้อนุญาตเขียนทับ:\n${existing.take(20).joinToString("\n") { it.path }}\nเปิดตัวเลือกเขียนทับ หากต้องการแทนที่ไฟล์เดิม") }
-        val results = StringBuilder("เริ่มอัปโหลด ${entries.size} ไฟล์\n"); var ok = 0
+        if (entries.size > 500) throw Exception("มีไฟล์เกิน 500 ไฟล์")
+
+        // Use Git Data API: upload blobs, create one tree, one commit, then update the branch ref once.
+        // This creates ONE commit/push event for the whole batch, so Actions will not run once per file.
+        val baseRef = "/repos/${enc(o)}/${enc(r)}/git/ref/heads/${enc(b)}"
+        val (refCode, refBody) = request("GET", baseRef)
+        if (refCode !in 200..299) throw Exception("อ่าน Branch reference ไม่สำเร็จ HTTP $refCode: $refBody")
+        val baseCommitSha = JSONObject(refBody).optJSONObject("object")?.optString("sha").orEmpty()
+        if (baseCommitSha.isBlank()) throw Exception("GitHub ไม่ส่ง SHA ของ commit ปัจจุบันกลับมา")
+        val (commitCode, commitBody) = request("GET", "/repos/${enc(o)}/${enc(r)}/git/commits/${enc(baseCommitSha)}")
+        if (commitCode !in 200..299) throw Exception("อ่าน commit ปัจจุบันไม่สำเร็จ HTTP $commitCode: $commitBody")
+        val baseTreeSha = JSONObject(commitBody).optJSONObject("tree")?.optString("sha").orEmpty()
+        if (baseTreeSha.isBlank()) throw Exception("GitHub ไม่ส่ง SHA ของ tree กลับมา")
+
+        val treeEntries = org.json.JSONArray()
+        val results = StringBuilder("เริ่มเตรียมไฟล์ ${entries.size} รายการเพื่อสร้าง commit เดียว\n")
         for ((i, item) in entries.withIndex()) {
-            val path = listOf(prefix, item.path).filter { it.isNotBlank() }.joinToString("/"); val endpoint = "/repos/${enc(o)}/${enc(r)}/contents/" + path.split("/").joinToString("/") { enc(it) }
-            val (gc, gb) = request("GET", "$endpoint?ref=${enc(b)}"); val oldSha = if (gc in 200..299) JSONObject(gb).optString("sha").takeIf { it.isNotBlank() } else null
-            if (oldSha != null && !overwrite.isChecked) { results.append("↷ ข้าม ").append(path).append(" — มีไฟล์เดิม\n"); continue }
-            val payload = JSONObject().put("message", message.text.toString().ifBlank { "Upload project from Android" } + " (${i + 1}/${entries.size})").put("content", Base64.encodeToString(item.bytes, Base64.NO_WRAP)).put("branch", b); if (oldSha != null) payload.put("sha", oldSha)
-            val (code, body) = request("PUT", endpoint, payload); if (code in 200..299) { ok++; results.append(if (oldSha == null) "✓ เพิ่ม " else "✓ เขียนทับ ").append(path).append("\n") } else results.append("✗ ").append(path).append(" — HTTP ").append(code).append(": ").append(body.take(180)).append("\n")
-            runOnUiThread { setLog("กำลังอัปโหลด ${i + 1}/${entries.size}\nสำเร็จ $ok ไฟล์") }
+            val path = listOf(prefix, item.path).filter { it.isNotBlank() }.joinToString("/")
+            if (path.split('/').any { it == ".." || it.isBlank() }) throw Exception("path ไม่ปลอดภัย: $path")
+            val contentEndpoint = "/repos/${enc(o)}/${enc(r)}/contents/" + path.split("/").joinToString("/") { enc(it) }
+            val (existingCode, existingBody) = request("GET", "$contentEndpoint?ref=${enc(b)}")
+            if (existingCode !in 200..299 && existingCode != 404) throw Exception("ตรวจไฟล์เดิม $path ไม่สำเร็จ HTTP $existingCode: $existingBody")
+            if (existingCode in 200..299 && !overwrite.isChecked) throw Exception("พบไฟล์เดิมใน GitHub: $path\nเปิดตัวเลือกอนุญาตเขียนทับ แล้วตรวจสอบ/เริ่มใหม่อีกครั้ง")
+            val blobBody = JSONObject().put("content", Base64.encodeToString(item.bytes, Base64.NO_WRAP)).put("encoding", "base64")
+            val (blobCode, blobResponse) = request("POST", "/repos/${enc(o)}/${enc(r)}/git/blobs", blobBody)
+            if (blobCode !in 200..299) throw Exception("อัปโหลดข้อมูลไฟล์ $path ไม่สำเร็จ HTTP $blobCode: $blobResponse")
+            val blobSha = JSONObject(blobResponse).optString("sha")
+            if (blobSha.isBlank()) throw Exception("ไม่ได้ SHA ของไฟล์ $path")
+            treeEntries.put(JSONObject().put("path", path).put("mode", "100644").put("type", "blob").put("sha", blobSha))
+            results.append("✓ เตรียม ${i + 1}/${entries.size}: $path\n")
+            runOnUiThread { setLog("[RUN] เตรียมไฟล์ ${i + 1}/${entries.size}\nจะสร้าง commit เดียวเมื่อเตรียมครบ") }
         }
-        return "เสร็จสิ้น: สำเร็จ $ok/${entries.size} ไฟล์\n\n$results"
+        val treeBody = JSONObject().put("base_tree", baseTreeSha).put("tree", treeEntries)
+        val (treeCode, treeResponse) = request("POST", "/repos/${enc(o)}/${enc(r)}/git/trees", treeBody)
+        if (treeCode !in 200..299) throw Exception("สร้าง Git tree ไม่สำเร็จ HTTP $treeCode: $treeResponse")
+        val newTreeSha = JSONObject(treeResponse).optString("sha")
+        if (newTreeSha.isBlank()) throw Exception("GitHub ไม่ส่ง SHA ของ tree ใหม่กลับมา")
+
+        val commitMessage = message.text.toString().ifBlank { "Upload project from Android" }
+        val commitPayload = JSONObject().put("message", commitMessage).put("tree", newTreeSha).put("parents", org.json.JSONArray().put(baseCommitSha))
+        val (newCommitCode, newCommitResponse) = request("POST", "/repos/${enc(o)}/${enc(r)}/git/commits", commitPayload)
+        if (newCommitCode !in 200..299) throw Exception("สร้าง commit ไม่สำเร็จ HTTP $newCommitCode: $newCommitResponse")
+        val newCommitSha = JSONObject(newCommitResponse).optString("sha")
+        if (newCommitSha.isBlank()) throw Exception("GitHub ไม่ส่ง SHA ของ commit ใหม่กลับมา")
+
+        // Force=false; update only if the branch still points at the base commit to avoid overwriting concurrent changes.
+        val updatePayload = JSONObject().put("sha", newCommitSha).put("force", false)
+        val (updateCode, updateResponse) = request("PATCH", baseRef, updatePayload)
+        if (updateCode !in 200..299) throw Exception("สร้าง commit แล้ว แต่เลื่อน Branch ไม่สำเร็จ HTTP $updateCode: $updateResponse\nตรวจหน้า Commits ก่อนลองใหม่ เพื่อป้องกัน commit ซ้ำ")
+        return "[OK] อัปโหลดเสร็จแล้ว\nไฟล์ใน commit เดียว: ${entries.size}\nBranch: $b\nCommit: $newCommitSha\n\nGitHub Actions จะถูกกระตุ้นจากการอัปเดต Branch ครั้งเดียว ไม่ใช่แยกทุกไฟล์\n\nรายละเอียดไฟล์:\n$results"
     }
     private fun deleteMatchingFiles(): String {
         val (_, o, r) = values(); if (zipEntries.isEmpty()) zipEntries = readZip(); val b = branch.text.toString().trim().ifEmpty { "main" }; val prefix = dest.text.toString().trim().trim('/'); val entries = zipEntries
