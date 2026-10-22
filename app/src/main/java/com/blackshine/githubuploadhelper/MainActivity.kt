@@ -319,6 +319,7 @@ class MainActivity : Activity() {
         // Use Git Data API: upload blobs, create one tree, one commit, then update the branch ref once.
         // This creates ONE commit/push event for the whole batch, so Actions will not run once per file.
         val baseRef = "/repos/${enc(o)}/${enc(r)}/git/ref/heads/${enc(b)}"
+        val updateRef = "/repos/${enc(o)}/${enc(r)}/git/refs/heads/${enc(b)}"
         val (refCode, refBody) = request("GET", baseRef)
         if (refCode !in 200..299) throw Exception("อ่าน Branch reference ไม่สำเร็จ HTTP $refCode: $refBody")
         val baseCommitSha = JSONObject(refBody).optJSONObject("object")?.optString("sha").orEmpty()
@@ -361,7 +362,7 @@ class MainActivity : Activity() {
 
         // Force=false; update only if the branch still points at the base commit to avoid overwriting concurrent changes.
         val updatePayload = JSONObject().put("sha", newCommitSha).put("force", false)
-        val (updateCode, updateResponse) = request("PATCH", baseRef, updatePayload)
+        val (updateCode, updateResponse) = request("PATCH", updateRef, updatePayload)
         if (updateCode !in 200..299) throw Exception("สร้าง commit แล้ว แต่เลื่อน Branch ไม่สำเร็จ HTTP $updateCode: $updateResponse\nตรวจหน้า Commits ก่อนลองใหม่ เพื่อป้องกัน commit ซ้ำ")
         return "[OK] อัปโหลดเสร็จแล้ว\nไฟล์ใน commit เดียว: ${entries.size}\nBranch: $b\nCommit: $newCommitSha\n\nGitHub Actions จะถูกกระตุ้นจากการอัปเดต Branch ครั้งเดียว ไม่ใช่แยกทุกไฟล์\n\nรายละเอียดไฟล์:\n$results"
     }
