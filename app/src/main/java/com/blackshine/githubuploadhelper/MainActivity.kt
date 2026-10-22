@@ -55,7 +55,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("repo_settings", MODE_PRIVATE)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(14, 12, 14, 12); setBackgroundColor(0xFFF3F5F9.toInt()) }
-        val header = TextView(this).apply { text = "GitHub Upload Helper 3.2"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
+        val header = TextView(this).apply { text = "GitHub Upload Helper 3.3"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(0xFF172554.toInt()); setPadding(0, 8, 0, 8) }
         root.addView(header)
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         root.addView(tabs)
@@ -204,13 +204,14 @@ class MainActivity : Activity() {
             setPadding(4, 4, 4, 8)
         }
         box.addView(tag); box.addView(name); box.addView(notes); box.addView(addApk); box.addView(apkInfo)
-        AlertDialog.Builder(this).setTitle("พบ GitHub Actions Workflow")
+        val dialog = AlertDialog.Builder(this).setTitle("พบ GitHub Actions Workflow")
             .setMessage("พบไฟล์ Workflow สำหรับทำงานอัตโนมัติ ต้องการสร้าง GitHub Release หรือเพิ่มขั้นตอนแนบ APK หรือไม่?")
             .setView(box).setNegativeButton("ปิด", null)
             .setNeutralButton("บันทึกตัวเลือก APK", null)
             .setPositiveButton("สร้าง Release", null)
-            .setOnShowListener {
-                val dlg = (it as AlertDialog)
+            .create()
+        dialog.setOnShowListener {
+                val dlg = dialog
                 dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
                     if (addApk.isChecked) {
                         try {
@@ -238,7 +239,8 @@ class MainActivity : Activity() {
                         runTask { createRelease(tag.text.toString(), name.text.toString(), notes.text.toString()) }
                     }
                 }
-            }.show()
+        }
+        dialog.show()
     }
     private fun patchWorkflowForReleaseApk() {
         val idx = zipEntries.indexOfFirst { it.path.replace("\\", "/").contains(".github/workflows/") && (it.path.endsWith(".yml", true) || it.path.endsWith(".yaml", true)) }
@@ -251,9 +253,10 @@ class MainActivity : Activity() {
         }
         // Ensure tag pushes trigger the workflow and grant release creation permission.
         if (!Regex("(?m)^\\s*tags\\s*:").containsMatchIn(yaml)) {
-            val pushPattern = Regex("(?m)^(\\s*)push\\s*:\s*$")
+            val pushPattern = Regex("""(?m)^(\s*)push\s*:\s*$""")
             yaml = if (pushPattern.containsMatchIn(yaml)) {
-                pushPattern.replaceFirst(yaml) { m -> m.value + "\n" + m.groupValues[1] + "  tags: [ 'v*' ]" }
+                val m = pushPattern.find(yaml)!!
+                yaml.replaceRange(m.range, m.value + "\n" + m.groupValues[1] + "  tags: [ 'v*' ]")
             } else {
                 yaml.replaceFirst(Regex("(?m)^on\\s*:\s*$"), "on:\n  push:\n    tags: [ 'v*' ]")
             }
