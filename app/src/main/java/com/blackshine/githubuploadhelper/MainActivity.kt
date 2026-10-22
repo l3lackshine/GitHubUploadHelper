@@ -258,11 +258,11 @@ class MainActivity : Activity() {
                 val m = pushPattern.find(yaml)!!
                 yaml.replaceRange(m.range, m.value + "\n" + m.groupValues[1] + "  tags: [ 'v*' ]")
             } else {
-                yaml.replaceFirst(Regex("(?m)^on\\s*:\s*$"), "on:\n  push:\n    tags: [ 'v*' ]")
+                yaml.replaceFirst(Regex("""(?m)^on\s*:\s*$"""), "on:\n  push:\n    tags: [ 'v*' ]")
             }
         }
         if (Regex("(?m)^permissions\\s*:").containsMatchIn(yaml)) {
-            yaml = yaml.replaceFirst(Regex("(?ms)^permissions\\s*:\s*\\n(?:[ \t]+[^\\n]*\\n)*"), "permissions:\n  contents: write\n")
+            yaml = yaml.replaceFirst(Regex("""(?ms)^permissions\s*:\s*\n(?:[ \t]+[^\n]*\n)*"""), "permissions:\n  contents: write\n")
         } else {
             yaml = yaml.replaceFirst(Regex("(?m)^jobs\\s*:"), "permissions:\n  contents: write\n\njobs:")
         }
